@@ -35,10 +35,29 @@ module.exports = async function run ({ ipc, args, cmdArgs, link, storage, detach
   let dir = cwd
   let base = null
   if (key === null) {
+    let entryPath = entry
     try {
-      dir = fs.statSync(entry).isDirectory() ? entry : path.dirname(entry)
-    } catch { /* ignore */ }
-    base = project(dir, pathname, cwd)
+      dir = fs.statSync(entryPath).isDirectory() ? entryPath : path.dirname(entryPath)
+    } catch {
+      // ignore
+    }
+
+    if (isPath && isWindows) {
+      // Fix malformed /C:/... and decode it
+      if (entryPath.startsWith('/')) {
+        entryPath = decodeURIComponent(entryPath.slice(1))
+      }
+
+      // Resolve relative path against cwd
+      if (!path.isAbsolute(entryPath)) {
+        entryPath = path.resolve(os.cwd(), entryPath)
+      }
+
+      // Normalize to canonical Windows absolute path
+      entryPath = path.normalize(entryPath)
+    }
+
+    base = project(dir, entryPath, cwd)
     dir = base.dir
     if (dir !== cwd) {
       Bare.on('exit', () => os.chdir(originalCwd)) // TODO: remove this once Pear.shutdown is used to close
@@ -160,13 +179,13 @@ module.exports = async function run ({ ipc, args, cmdArgs, link, storage, detach
       child.stderr.on('data', (data) => {
         const str = data.toString()
         const ignore = str.indexOf('DevTools listening on ws://') > -1 ||
-              str.indexOf('NSApplicationDelegate.applicationSupportsSecureRestorableState') > -1 ||
-              str.indexOf('", source: devtools://devtools/') > -1 ||
-              str.indexOf('sysctlbyname for kern.hv_vmm_present failed with status -1') > -1 ||
-              str.indexOf('dev.i915.perf_stream_paranoid=0') > -1 ||
-              str.indexOf('libva error: vaGetDriverNameByIndex() failed') > -1 ||
-              str.indexOf('GetVSyncParametersIfAvailable() failed') > -1 ||
-              (str.indexOf(':ERROR:') > -1 && /:ERROR:.+cache/.test(str))
+          str.indexOf('NSApplicationDelegate.applicationSupportsSecureRestorableState') > -1 ||
+          str.indexOf('", source: devtools://devtools/') > -1 ||
+          str.indexOf('sysctlbyname for kern.hv_vmm_present failed with status -1') > -1 ||
+          str.indexOf('dev.i915.perf_stream_paranoid=0') > -1 ||
+          str.indexOf('libva error: vaGetDriverNameByIndex() failed') > -1 ||
+          str.indexOf('GetVSyncParametersIfAvailable() failed') > -1 ||
+          (str.indexOf(':ERROR:') > -1 && /:ERROR:.+cache/.test(str))
         if (ignore) return
         stream.push({ tag: 'stderr', data })
       })
@@ -180,8 +199,19 @@ module.exports = async function run ({ ipc, args, cmdArgs, link, storage, detach
 
 function project (dir, origin, cwd) {
   try {
-    if (JSON.parse(fs.readFileSync(path.join(dir, 'package.json'))).pear) {
-      return { dir, origin, entrypoint: isWindows ? path.normalize(origin.slice(1)).slice(dir.length) : origin.slice(dir.length) }
+    const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf-8'))
+    if (pkg.pear) {
+      const normalizedDir = path.resolve(dir)
+      const normalizedOrigin = path.resolve(origin)
+      const relative = path.relative(normalizedDir, normalizedOrigin)
+
+      // If origin == dir, return entrypoint as main or default
+      let entrypoint = relative || pkg.main || 'index.js'
+
+      // Strip leading './' if it appears
+      if (entrypoint.startsWith('./')) entrypoint = entrypoint.slice(2)
+
+      return { dir: normalizedDir, origin: normalizedOrigin, entrypoint }
     }
   } catch (err) {
     if (err.code !== 'ENOENT' && err.code !== 'EISDIR' && err.code !== 'ENOTDIR') throw err
